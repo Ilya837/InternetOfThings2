@@ -2,6 +2,8 @@
 #include <WiFi.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
+#include <ArduinoJson.h>
+#include <LittleFS.h>
 
 
 
@@ -117,24 +119,35 @@ const char aut_html[] PROGMEM = R"rawliteral(
 
 <script>
     document.getElementById('form1').addEventListener('submit', function(event) {
-            event.preventDefault();
-            
-            let username = form.Username.value;
-            let password = form.Password.value;
-
-            var xhr = new XMLHttpRequest();
-            xhr.open("POST", "/?username="+username+"&password="+password,true);
-            
-
-            
-        if (xhr.status === 200) {
+        event.preventDefault();
         
+        let username = document.getElementById('Username').value;
+        let password = document.getElementById('Password').value;
 
-            setTimeout(function() {
-                window.location.href = 'http://example.com/dashboard';
-            }, 1000);  // Перенаправление через 1 секунду
-        }
-        });
+        // ??????? URL ? ???????????
+        let url = "/?username=" + encodeURIComponent(username) + 
+                 "&password=" + encodeURIComponent(password);
+        
+        // ?????????? GET-?????? (????? ???????? ?? POST ??? ?????????????)
+        fetch(url)
+            .then(response => {
+                if (response.ok) {
+                    // ???? ????? ???????? (200-299), ?????????? ?????
+                    return response.text();
+                }
+                throw new Error('Network response was not ok');
+            })
+            .then(html => {
+                // ???????? ?????????? ???????? ?? ?????????? HTML
+                document.open();
+                document.write(html);
+                document.close();
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert("Login failed. Please try again.");
+            });
+    });
 </script>
 
 </body>
@@ -144,7 +157,106 @@ const char aut_html[] PROGMEM = R"rawliteral(
 
 )rawliteral";
 
+const char arr_html[] PROGMEM = R"rawliteral(
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Real-Time Array Display</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        h1 {
+            color: #333;
+        }
+        #array-container {
+            margin: 20px 0;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            background-color: #f9f9f9;
+        }
+        .update-info {
+            font-size: 0.9em;
+            color: #666;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Real-Time Array Display</h1>
+    <div id="array-container">
+        <p>Current array: <span id="array-content">Loading...</span></p>
+        <p class="update-info">Last updated: <span id="last-updated">-</span></p>
+    </div>
+
+    <script>
+        const socket = new WebSocket(`ws://${window.location.hostname}/ws`);
+
+        socket.onopen = function(e) {
+            console.log("WebSocket connection established");
+            document.getElementById('array-content').textContent = "Waiting for data...";
+        };
+
+        socket.onmessage = function(event) {
+            const data = JSON.parse(event.data);
+            document.getElementById('array-content').textContent = JSON.stringify(data.array);
+            document.getElementById('last-updated').textContent = new Date().toLocaleTimeString();
+        };
+
+        socket.onerror = function(error) {
+            console.error("WebSocket error:", error);
+            document.getElementById('array-content').textContent = "Connection error";
+        };
+
+        socket.onclose = function(event) {
+            if (event.wasClean) {
+                console.log(`Connection closed cleanly, code=${event.code}, reason=${event.reason}`);
+            } else {
+                console.log('Connection died');
+                document.getElementById('array-content').textContent = "Connection lost - trying to reconnect...";
+                setTimeout(() => window.location.reload(), 2000);
+            }
+        };
+    </script>
+</body>
+</html>
+)rawliteral";
+
+int arrSize = 30;
+double* arr = new double[arrSize];
+
 AsyncWebServer server(80);
+AsyncWebSocket ws("/ws");
+
+
+void notifyClients() {
+    DynamicJsonDocument doc(1024);
+    JsonArray array = doc.createNestedArray("array");
+    
+    for(int i = 0; i< arrSize;i++) {
+        array.add(arr[i]);
+    }
+    
+    String json;
+    serializeJson(doc, json);
+    ws.textAll(json);
+}
+
+void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len) {
+    if(type == WS_EVT_CONNECT) {
+        Serial.printf("WebSocket client #%u connected from %s\n", client->id(), client->remoteIP().toString().c_str());
+        // ??? ??????????? ????? ?????????? ??????? ??????
+        notifyClients();
+    } else if(type == WS_EVT_DISCONNECT) {
+        Serial.printf("WebSocket client #%u disconnected\n", client->id());
+    }
+}
+
 String outputState(int output){
     if(digitalRead(output)){
         return "checked";
@@ -163,28 +275,41 @@ String processor(const String&var){
     return String();
 }
 
-const char* PARAM_INPUT_1 = "output";
-const char* PARAM_INPUT_2 = "state";
 
 const String RealUsername = "A", RealPassword = "123";
 
 class CaptiveRequestHandler : public AsyncWebHandler{
+
+    private:
+
     public:
-    CaptiveRequestHandler() {}
+    CaptiveRequestHandler() {
+        for(int i =0; i< arrSize;i++){
+            arr[i] = 0;
+        }
+    }
+
     virtual ~CaptiveRequestHandler() {}
     bool canHandle(AsyncWebServerRequest *request) {
-        
+        if(request->url() == "/ws") {
+        return false;
+        }
   
-        return true;}
+        return true;
+    }
+
     void handleRequest(AsyncWebServerRequest *request){
         Serial.println(1);
         if(request->url() == "/"){
 
             String Username, Password;
+
+            char* PARAM_INPUT_1 = "username";
+            char* PARAM_INPUT_2 = "password";
             Serial.println(2);
-            if(request->hasParam("username") && request->hasParam("password")){
-                Username = request->getParam("username")->value();
-                Password = request->getParam("password")->value();
+            if(request->hasParam(PARAM_INPUT_1) && request->hasParam(PARAM_INPUT_2)){
+                Username = request->getParam(PARAM_INPUT_1)->value();
+                Password = request->getParam(PARAM_INPUT_2)->value();
                 Serial.println(Username);
                 Serial.println(Password);
                 if(Username.equals( RealUsername) && Password.equals( RealPassword)){
@@ -192,19 +317,22 @@ class CaptiveRequestHandler : public AsyncWebHandler{
                 }
                 else{
                         Serial.println(Username.equals( RealUsername) );
-                Serial.println(Password.equals( RealPassword));
+                        Serial.println(Password.equals( RealPassword));
                 request->send_P(201, "text/html", aut_html);
                 }
 
             }
             else{
-                Serial.println(request->hasParam("username"));
-                Serial.println(request->hasParam("password"));
+                Serial.println(request->hasParam(PARAM_INPUT_1));
+                Serial.println(request->hasParam(PARAM_INPUT_2));
 
                 request->send_P(201, "text/html", aut_html);
             }
         }
         else if(request->url() == "/update"){
+
+            char* PARAM_INPUT_1 = "output";
+            char* PARAM_INPUT_2 = "state";
 
             Serial.println(request->url());
             String inputMessage1, inputMessage2;
@@ -226,7 +354,7 @@ class CaptiveRequestHandler : public AsyncWebHandler{
         }
 
 
-            Serial.println(request->url());
+        Serial.println(request->url());
     }
 };
 
@@ -235,13 +363,37 @@ void setup() {
   pinMode(2,OUTPUT);
   digitalWrite(2,LOW);
   WiFi.softAP("esp-captive_Mikerin");
-server.addHandler(new CaptiveRequestHandler());
-server.begin();
 
     
+
+    ws.onEvent(onWsEvent);
+
+    server.addHandler(&ws);
+
+    
+    server.addHandler(new CaptiveRequestHandler());
+    server.on("/ws", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send_P(200, "text/html", arr_html);
+});
+    
+    server.begin();
 }
 
+int counter = 0;
+int arrPoint = 0;
+
 void loop() {
+
+    counter++;
+
+    if(counter > 20){
+        counter = 0;
+        arr[arrPoint] ++;
+        arrPoint = (arrPoint + 1) % arrSize;
+
+        notifyClients();
+
+    }
   
   delay(20);
 }
