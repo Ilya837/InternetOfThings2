@@ -3,8 +3,9 @@
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
-#include <LittleFS.h>
+#include <SPIFFS.h>
 
+#include <HTTPClient.h>
 
 
 int red = 27;
@@ -187,25 +188,83 @@ const char arr_html[] PROGMEM = R"rawliteral(
         }
     </style>
 </head>
+<script
+    src="/Chart">
+    </script>
 <body>
+    
     <h1>Real-Time Array Display</h1>
     <div id="array-container">
         <p>Current array: <span id="array-content">Loading...</span></p>
         <p class="update-info">Last updated: <span id="last-updated">-</span></p>
+        <canvas id="myChart" style="width:100%;max-width:700px"></canvas>
     </div>
+    
 
     <script>
         const socket = new WebSocket(`ws://${window.location.hostname}/ws`);
+        var myChart = null;
 
         socket.onopen = function(e) {
             console.log("WebSocket connection established");
             document.getElementById('array-content').textContent = "Waiting for data...";
         };
 
+        function createChart(xValues, yValues) {
+            const ctx = document.getElementById('myChart').getContext('2d');
+            myChart = new Chart(ctx, {
+                type: "line",
+                data: {
+                    labels: xValues,
+                    datasets: [{
+                        label: "Array Values",
+                        backgroundColor: "rgba(0,0,255,1.0)",
+                        borderColor: "rgba(0,0,255,0.8)",
+                        data: yValues,
+                        fill: false,
+                        borderWidth: 2
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: true,
+                    scales: {
+                        yAxes: [{
+                            ticks: {
+                                beginAtZero: true
+                            }
+                        }]
+                    }
+                }
+            });
+        }
+
+        function updateChart(xValues, yValues) {
+            if (myChart) {
+                myChart.data.labels = xValues;
+                myChart.data.datasets[0].data = yValues;
+                myChart.update();
+            } else {
+                createChart(xValues, yValues);
+            }
+        }
+
         socket.onmessage = function(event) {
             const data = JSON.parse(event.data);
             document.getElementById('array-content').textContent = JSON.stringify(data.array);
             document.getElementById('last-updated').textContent = new Date().toLocaleTimeString();
+
+            xValues = data.array;
+            yValues = data.array;
+
+            if (myChart) {
+                myChart.data.labels = xValues;
+                myChart.data.datasets[0].data = yValues;
+                myChart.update();
+            } else {
+                createChart(xValues, yValues);
+            }
+
         };
 
         socket.onerror = function(error) {
@@ -291,7 +350,7 @@ class CaptiveRequestHandler : public AsyncWebHandler{
 
     virtual ~CaptiveRequestHandler() {}
     bool canHandle(AsyncWebServerRequest *request) {
-        if(request->url() == "/ws") {
+        if(request->url() == "/ws" || request->url() == "/Chart") {
         return false;
         }
   
@@ -358,23 +417,70 @@ class CaptiveRequestHandler : public AsyncWebHandler{
     }
 };
 
+
+String readFile(fs::FS &fs, const char *path) {
+  File file = fs.open(path, "r");
+  if (!file || file.isDirectory()) {
+    return String();
+  }
+  
+  String content;
+  while(file.available()) {
+    content += char(file.read());
+  }
+  file.close();
+  return content;
+}
+
+String data;
+
 void setup() {
   Serial.begin(115200);
+
+   if (!SPIFFS.begin()) {
+    Serial.println("?????? ????????????? SPIFFS");
+    return;
+  }
   pinMode(2,OUTPUT);
   digitalWrite(2,LOW);
   WiFi.softAP("esp-captive_Mikerin");
 
-    
+//    WiFi.config(
+//     WiFi.localIP(),    // ????????? IP (??? INADDR_NONE ??? DHCP)
+//     WiFi.gatewayIP(),  // ????
+//     IPAddress(8, 8, 8, 8),  // ???????? DNS
+//     IPAddress(8, 8, 4, 4)   // ?????????????? DNS
+//   );
 
-    ws.onEvent(onWsEvent);
+//   while (WiFi.status() != WL_CONNECTED) {
+//     delay(500);
+//     Serial.print(".");
+//   }
+  
+  //Serial.println("\nConnected! IP: " + WiFi.localIP());
+
+  ws.onEvent(onWsEvent);
 
     server.addHandler(&ws);
+
+    //data = readFile(SPIFFS, "/Chart.js");
+    //Serial.println(data);
+
+    
+    server.on("/Chart", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send(SPIFFS, "/Chart.js", "application/javascript");
+    });
+    
+
+    
 
     
     server.addHandler(new CaptiveRequestHandler());
     server.on("/ws", HTTP_GET, [](AsyncWebServerRequest *request){
     request->send_P(200, "text/html", arr_html);
-});
+    });
+
+    
     
     server.begin();
 }
